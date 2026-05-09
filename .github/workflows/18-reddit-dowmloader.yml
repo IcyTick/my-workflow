@@ -1,0 +1,222 @@
+name: 👽 11-Download Reddit Media
+
+on:
+  workflow_dispatch:
+    inputs:
+      subreddit:
+        description: 'Subreddit name (e.g. aww)'
+        required: true
+        default: 'aww'
+      sort:
+        description: 'Sorting method (hot, new, top)'
+        required: true
+        default: 'hot'
+      skip:
+        description: 'Number of initial posts to skip'
+        required: true
+        default: '0'
+      count:
+        description: 'Number of posts to fetch (max 100)'
+        required: true
+        default: '10'
+      include_text:
+        description: 'Save post text?'
+        required: true
+        type: boolean
+        default: false
+      include_link:
+        description: 'Save post link?'
+        required: true
+        type: boolean
+        default: false
+      max_height:
+        description: 'Maximum height (pixels) – 0 means no resize'
+        required: true
+        default: '0'
+      t:
+        description: 'Time range for top (hour, day, week, month, year, all)'
+        required: false
+        default: 'day'
+      zip_password:
+        description: 'Password for encrypted ZIP (leave empty for no encryption)'
+        required: false
+        type: string
+        default: ''
+      zip_compression:
+        description: 'Compression level (0=store, 1=fastest, 9=best)'
+        required: false
+        type: number
+        default: 6
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Get OAuth2 token from Reddit (if credentials exist)
+      - name: 🔑 Get Reddit Access Token
+        id: auth
+        env:
+          CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        run: |
+          if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ]; then
+            echo "🟢 Using OAuth2"
+            RESPONSE=$(curl -s -X POST -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" \
+              -u "$CLIENT_ID:$CLIENT_SECRET" \
+              -d "grant_type=client_credentials" \
+              https://www.reddit.com/api/v1/access_token)
+            TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+            if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+              echo "❌ Failed to obtain token: $RESPONSE"
+              exit 1
+            fi
+            echo "ACCESS_TOKEN=$TOKEN" >> $GITHUB_ENV
+          else
+            echo "🟡 Using public mode (without OAuth2)"
+            echo "ACCESS_TOKEN=" >> $GITHUB_ENV
+          fi
+
+      # Step 2: Fetch list of posts from Reddit API
+      - name: 📥 Fetch Posts
+        id: fetch
+        run: |
+          SUBREDDIT="${{ github.event.inputs.subreddit }}"
+          SORT="${{ github.event.inputs.sort }}"
+          SKIP="${{ github.event.inputs.skip }}"
+          LIMIT="${{ github.event.inputs.count }}"
+          T="${{ github.event.inputs.t }}"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+          TOTAL=$((SKIP + LIMIT))
+          if [ -n "$ACCESS_TOKEN" ]; then
+            API_URL="https://oauth.reddit.com/r/${SUBREDDIT}/${SORT}.json?limit=${TOTAL}&t=${T}&raw_json=1"
+            curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" -H "User-Agent: $UA" "$API_URL" -o raw.json
+          else
+            API_URL="https://www.reddit.com/r/${SUBREDDIT}/${SORT}.json?limit=${TOTAL}&t=${T}&raw_json=1"
+            curl -sS -H "User-Agent: $UA" "$API_URL" -o raw.json
+          fi
+
+          # Process and filter
+          jq '[.data.children[].data]' raw.json > all_posts.json
+
+          # Remove sticky and ad posts
+          jq '[.[] | select(.stickied == false and .is_ad == false)]' all_posts.json > filtered.json
+
+          # Keep only posts with at least one media element
+          jq '[.[] | select(
+            (.is_gallery == true and .media_metadata != null) or
+            (.post_hint == "image") or
+            (.post_hint == "hosted:video") or
+            (.url | test("\\.(jpg|jpeg|png|gif|mp4|webm|mov)(\\?.*)?$"; "i"))
+          )]' filtered.json > media_posts.json
+
+          # Apply skip and limit
+          jq ".[$SKIP:$((SKIP+LIMIT))]" media_posts.json > posts.json
+
+          echo "📄 Final post count: $(jq length posts.json)"
+
+      # Step 3: Extract text and link (if requested)
+      - name: 📝 Save Text and Links
+        if: ${{ github.event.inputs.include_text == true || github.event.inputs.include_link == true }}
+        run: |
+          jq -r '.[] |
+            "---\nTitle: \(.title)\n" +
+            (if "'${{ github.event.inputs.include_text }}'" == "true" then "Selftext: \(.selftext // "N/A")\n" else "" end) +
+            (if "'${{ github.event.inputs.include_link }}'" == "true" then "Link: https://www.reddit.com\(.permalink)\n" else "" end) +
+            "---"' posts.json > posts_summary.txt
+
+      # Step 4: Install media tools (ffmpeg, imagemagick, zip)
+      - name: 🛠️ Install Multimedia Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg imagemagick zip
+
+      # Step 5: Extract all media URLs and download files
+      - name: 🖼️ Extract and Download Media Files
+        run: |
+          mkdir -p downloads
+          # Extract URLs of all media (gallery images, reddit videos, direct images, direct links)
+          jq -r '.[] |
+            [
+              # Galleries
+              (select(.is_gallery) | .media_metadata | to_entries[].value |
+                (if .p then (.p[-1].u) else (.s.u) end) ),
+              # Reddit videos
+              (select(.media.reddit_video) | .media.reddit_video.fallback_url),
+              # Direct images
+              (select(.post_hint == "image") | .url),
+              # Other direct links
+              (select(.url | test("\\.(jpg|jpeg|png|gif|mp4|webm|mov)(\\?.*)?$"; "i")) | .url)
+            ] | .[]' posts.json | while read url; do
+            if [ -n "$url" ]; then
+              echo "📡 Downloading: $url"
+              wget --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" \
+                   --tries=3 --waitretry=5 --random-wait \
+                   -q -P downloads "$url" || echo "⚠️ Download failed: $url"
+              # Random delay between 1 and 4 seconds
+              sleep $(( RANDOM % 4 + 1 ))
+            fi
+          done
+          echo "✅ Download finished. Files: $(ls downloads | wc -l)"
+
+      # Step 6: Optionally reduce resolution
+      - name: 🔄 Resize Media (Optional)
+        if: ${{ github.event.inputs.max_height != '0' && github.event.inputs.max_height != '' }}
+        run: |
+          MAX_HEIGHT="${{ github.event.inputs.max_height }}"
+          echo "🔧 Resizing to height ≤ ${MAX_HEIGHT}px"
+          cd downloads
+          for file in *; do
+            [ -f "$file" ] || continue
+            ext="${file##*.}"
+            ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+            case "$ext_lower" in
+              jpg|jpeg|png|gif|webp|bmp)
+                height=$(identify -format "%h" "$file" 2>/dev/null)
+                if [ -n "$height" ] && [ "$height" -gt "$MAX_HEIGHT" ]; then
+                  echo "🖼️ Resizing $file (${height}px -> ${MAX_HEIGHT}px)"
+                  mogrify -resize x${MAX_HEIGHT} "$file"
+                fi
+                ;;
+              mp4|webm|mov|mkv|avi)
+                height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$file" 2>/dev/null)
+                if [ -n "$height" ] && [ "$height" -gt "$MAX_HEIGHT" ]; then
+                  echo "🎞️ Transcoding $file (${height}px -> ${MAX_HEIGHT}px)"
+                  ffmpeg -y -i "$file" -vf "scale=-2:${MAX_HEIGHT}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k -movflags +faststart "tmp_${file}" 2>/dev/null
+                  mv "tmp_${file}" "$file"
+                fi
+                ;;
+            esac
+          done
+          echo "✅ Resizing complete."
+
+      # Step 7: Package outputs into a ZIP archive (with optional encryption and compression level)
+      - name: 📦 Create ZIP Archive
+        if: success()
+        run: |
+          ZIP_NAME="reddit_media_${{ github.run_id }}.zip"
+          ZIP_LEVEL="${{ github.event.inputs.zip_compression }}"
+          # Validate compression level (0-9), fallback to 6 if out of range
+          if ! [[ "$ZIP_LEVEL" =~ ^[0-9]$ ]]; then
+            echo "⚠️ Invalid compression level '$ZIP_LEVEL', using default (6)"
+            ZIP_LEVEL=6
+          fi
+
+          if [ -n "${{ github.event.inputs.zip_password }}" ]; then
+            echo "🔐 Creating encrypted ZIP (compression level $ZIP_LEVEL)..."
+            zip -q -r -"$ZIP_LEVEL" -P "${{ github.event.inputs.zip_password }}" "$ZIP_NAME" downloads posts.json posts_summary.txt
+          else
+            echo "📦 Creating unencrypted ZIP (compression level $ZIP_LEVEL)..."
+            zip -q -r -"$ZIP_LEVEL" "$ZIP_NAME" downloads posts.json posts_summary.txt
+          fi
+          echo "ZIP_FILE=$ZIP_NAME" >> $GITHUB_ENV
+          echo "✅ ZIP archive created: $ZIP_NAME"
+
+      # Step 8: Upload everything as an artifact
+      - name: 📤 Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddit-media-${{ github.run_id }}
+          path: |
+            downloads/
+            posts.json
+            posts_summary.txt
+            ${{ env.ZIP_FILE }}

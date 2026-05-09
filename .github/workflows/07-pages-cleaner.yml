@@ -1,15 +1,15 @@
-name: 🗑 11-Clean Videos folder
+name: 🗑 13-Clean Pages folder
 
 on:
   workflow_dispatch:
     inputs:
       warning:
-        description: '⚠️ WARNING: This will DELETE the entire videos/ folder and recreate it. Only proceed if you are sure.'
+        description: '⚠️ WARNING: This will DELETE the entire pages/ folder and recreate it. Only proceed if you are sure.'
         required: false
         default: 'Read this warning before proceeding'
 
 jobs:
-  clean-videos:
+  clean-pages:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -18,32 +18,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Recreate videos folder with README
+      - name: Recreate pages folder with README
         run: |
-          rm -rf videos
-          mkdir videos
-          cat > videos/README.md << 'EOF'
-          # Videos
+          rm -rf pages
+          mkdir pages
+          cat > pages/README.md << 'EOF'
+          # Pages
           
           ---
           
-          The folder is empty. Start downloading videos using the available workflows.
+          The folder is empty. Start browsing websites using the available workflows to save pages here.
           
           ---
           EOF
-          echo "Videos folder cleaned and README.md added."
+          echo "Pages folder cleaned and README.md added."
 
       - name: Commit and push changes
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          git add videos/
+          git add pages/
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "[Clean] Clear videos folder [skip ci]"
+            git commit -m "[Clean] Clear pages folder [skip ci]"
             git pull --rebase origin "${{ github.ref_name }}"
             git push origin HEAD:"${{ github.ref_name }}"
-            echo "✅ Videos folder has been cleaned and committed."
+            echo "✅ Pages folder has been cleaned and committed."
           fi

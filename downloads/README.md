@@ -36,6 +36,8 @@
 - [archive_20260506_121528](./archive_20260506_121528)
 - [archive_20260506_142627](./archive_20260506_142627)
 - [error_3776c8aa7212_build-tools_r34-rc2-windows.zip](./error_3776c8aa7212_build-tools_r34-rc2-windows.zip)
+- [file_8850baad495f_chromedriver-win64.zip](./file_8850baad495f_chromedriver-win64.zip)
+- [file_dbac49dce0e9_chromedriver-win64.zip](./file_dbac49dce0e9_chromedriver-win64.zip)
 - [mhrv-rs-android-arm64-v8a-v1.9.14](./mhrv-rs-android-arm64-v8a-v1.9.14)
 
 ---
